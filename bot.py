@@ -60,11 +60,9 @@ MONTHS_RU = [
 
 # ========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ==========
 def parse_date_from_string(date_str: str) -> datetime | None:
-    """Пытается распарсить дату в формате ДД.ММ.ГГГГ или ДД.ММ.ГГ"""
-    date_str = date_str.strip()
     for fmt in ("%d.%m.%Y", "%d.%m.%y"):
         try:
-            return datetime.strptime(date_str, fmt)
+            return datetime.strptime(date_str.strip(), fmt)
         except ValueError:
             continue
     return None
@@ -95,7 +93,11 @@ def find_month_row_on_itto(worksheet, month_name: str) -> int | None:
             return row
     return None
 
-def add_value_to_cell_with_comment(sheet, col_letter: str, row_num: int, amount: float, comment_text: str):
+def add_value_to_cell_with_comment(sheet, col_letter: str, row_num: int, amount: float, comment_text: str = None):
+    """
+    Прибавляет сумму к ячейке и, если comment_text задан, добавляет комментарий.
+    comment_text может быть пустой строкой или None – тогда комментарий не создаётся.
+    """
     cell = sheet[f"{col_letter}{row_num}"]
     if cell.data_type == 'f':
         return False, f"Ячейка {col_letter}{row_num} содержит формулу. Бот не может её изменить."
@@ -105,17 +107,21 @@ def add_value_to_cell_with_comment(sheet, col_letter: str, row_num: int, amount:
     except (TypeError, ValueError):
         return False, f"В ячейке {col_letter}{row_num} не число: {old}"
     cell.value = new
-    new_comment = f"{datetime.now().strftime('%Y-%m-%d %H:%M')}: {comment_text}"
-    if cell.comment:
-        new_comment = f"{cell.comment.text}\n{new_comment}"
-    cell.comment = Comment(new_comment, "Telegram бот")
+
+    # Добавляем комментарий только если передан непустой текст
+    if comment_text and comment_text.strip():
+        new_comment = comment_text.strip()
+        if cell.comment:
+            new_comment = f"{cell.comment.text}\n{new_comment}"
+        cell.comment = Comment(new_comment, "Telegram бот")
+
     return True, f"✅ Добавлено {amount:.2f} руб. в {col_letter}{row_num}"
 
-def update_income_summary(amount: float, keyword: str, original_text: str, month_date: datetime):
+def update_income_summary(amount: float, keyword: str, comment: str, month_date: datetime):
     try:
         wb = load_workbook(EXCEL_FILE)
     except FileNotFoundError:
-        return False, f"Файл {EXCEL_FILE} не найден на сервере. Загрузите его в папку с ботом."
+        return False, f"Файл {EXCEL_FILE} не найден на сервере."
     except Exception as e:
         return False, f"Ошибка открытия файла: {e}"
 
@@ -132,7 +138,7 @@ def update_income_summary(amount: float, keyword: str, original_text: str, month
         col, _ = INCOME_CATEGORY_MAP[keyword]
     else:
         col = "AI"
-    comment = f"Доход: {keyword} ({original_text})"
+    # Для дохода комментарий передаём только если он есть
     success, msg = add_value_to_cell_with_comment(ws_itto, col, row_num, amount, comment)
     if success:
         wb.save(EXCEL_FILE)
@@ -151,6 +157,7 @@ def process_operation(line: str, target_date: datetime) -> str:
     if income_match:
         amount = float(income_match.group(1).replace(',', '.'))
         keyword_and_comment = income_match.group(2).strip()
+        # Разделяем на ключевое слово и остаток (комментарий)
         parts = keyword_and_comment.split(maxsplit=1)
         keyword = parts[0].lower() if parts else ""
         comment = parts[1] if len(parts) > 1 else ""
@@ -159,7 +166,7 @@ def process_operation(line: str, target_date: datetime) -> str:
         try:
             wb = load_workbook(EXCEL_FILE)
         except FileNotFoundError:
-            return f"❌ Файл {EXCEL_FILE} не найден на сервере. Загрузите его."
+            return f"❌ Файл {EXCEL_FILE} не найден на сервере."
         except Exception as e:
             return f"❌ Ошибка открытия файла: {e}"
 
@@ -172,15 +179,16 @@ def process_operation(line: str, target_date: datetime) -> str:
             wb.close()
             return f"❌ Не найдена строка для {target_date.day}-го дня на листе {month_sheet}"
 
-        success, msg_month = add_value_to_cell_with_comment(ws_month, "U", row, amount,
-            f"Доход: {keyword_and_comment} (исходное: {line})")
+        # Записываем доход в столбец U (комментарий опционально)
+        success, msg_month = add_value_to_cell_with_comment(ws_month, "U", row, amount, comment)
         if not success:
             wb.close()
             return msg_month
         wb.save(EXCEL_FILE)
         wb.close()
 
-        success_itto, msg_itto = update_income_summary(amount, keyword, line, target_date)
+        # Обновляем ИТОГО (передаём тот же комментарий)
+        success_itto, msg_itto = update_income_summary(amount, keyword, comment, target_date)
         if success_itto:
             return f"✅ Доход:\n   {msg_month}\n   {msg_itto}"
         else:
@@ -191,7 +199,7 @@ def process_operation(line: str, target_date: datetime) -> str:
     if match:
         amount = float(match.group(1).replace(',', '.'))
         keyword = match.group(2).lower()
-        comment = match.group(3) if match.group(3) else ""
+        comment = match.group(3) if match.group(3) else ""  # может быть пустым
         if keyword not in EXPENSE_CATEGORY_MAP:
             return f"❌ Неизвестная категория расхода: {keyword}"
         col = EXPENSE_CATEGORY_MAP[keyword]
@@ -200,7 +208,7 @@ def process_operation(line: str, target_date: datetime) -> str:
         try:
             wb = load_workbook(EXCEL_FILE)
         except FileNotFoundError:
-            return f"❌ Файл {EXCEL_FILE} не найден на сервере. Загрузите его."
+            return f"❌ Файл {EXCEL_FILE} не найден на сервере."
         except Exception as e:
             return f"❌ Ошибка открытия файла: {e}"
 
@@ -212,8 +220,9 @@ def process_operation(line: str, target_date: datetime) -> str:
         if row is None:
             wb.close()
             return f"❌ Не найдена строка для {target_date.day}-го дня на листе {month_sheet}"
-        full_comment = f"{comment} (исходное: {line})" if comment else f"исходное: {line}"
-        success, msg = add_value_to_cell_with_comment(ws, col, row, amount, full_comment)
+
+        # Передаём комментарий (может быть пустым)
+        success, msg = add_value_to_cell_with_comment(ws, col, row, amount, comment)
         if success:
             wb.save(EXCEL_FILE)
         wb.close()
@@ -224,20 +233,23 @@ def process_operation(line: str, target_date: datetime) -> str:
 # ========== ОБРАБОТЧИКИ TELEGRAM ==========
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "💰 Бот для учёта расходов и доходов (облачная версия)\n\n"
+        "💰 Бот для учёта расходов и доходов\n\n"
         "📆 **Формат сообщения**:\n"
-        "Первая строка — дата в формате ДД.ММ.ГГГГ (например, 04.05.2026)\n"
-        "Затем каждая новая строка — одна операция:\n"
-        "  • Расход: `сумма &категория комментарий`\n"
-        "  • Доход: `+сумма &ключевое_слово комментарий`\n\n"
+        "Первая строка — дата ДД.ММ.ГГГГ (необязательно, если пропустить – используется сегодня)\n"
+        "Затем каждая новая строка — операция:\n"
+        "  • Расход: `сумма &категория [комментарий]`\n"
+        "  • Доход: `+сумма &ключ [комментарий]`\n\n"
         "Пример:\n"
-        "04.05.2026\n"
+        "10.07.2026\n"
         "500 &продукты хлеб\n"
-        "+30000 &зарплата аванс\n\n"
+        "+30000 &зарплата аванс\n"
+        "120 &транспорт\n\n"
+        "Комментарий не обязателен – если его нет, ячейка остаётся без примечания.\n\n"
         "Доступные категории расходов:\n"
-        "продукты, едавнедома, ярослав, транспорт, работа, платежи, гардероб,\n"
-        "крупныепокупки, хозтовары, косметика, салоны, здоровье, подарки,\n"
-        "психотерапевт, спорт, магия, развлечения, путешествия\n\n"
+        "продукты, едавнедома, ярослав, транспорт, работа, платежи,\n"
+        "гардероб, крупныепокупки, хозтовары, косметика, салоны,\n"
+        "здоровье, подарки, психотерапевт, спорт, магия,\n"
+        "развлечения, путешествия\n\n"
         "Ключевые слова для доходов:\n"
         "зарплата, аванс, шабашка → столбец 'Я' (AG)\n"
         "алименты → 'Алименты' (AH)\n"
